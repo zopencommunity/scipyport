@@ -71,14 +71,83 @@ zopen_get_version() {
 
 # --- per-interpreter facts, all recomputed rather than trusted -------------
 
+# scipy enforces clang >= 15 in its own meson.build ("SciPy requires clang >=
+# 15.0"). sysconfig reports the compiler the interpreter was built with, which
+# is older than that here, so prefer the newest clang installed on the machine
+# and fall back to sysconfig's only when nothing newer exists -- in which case
+# scipy's own check produces the clear error.
+#
+# Building extensions with a newer compiler than the interpreter was built with
+# is safe on this platform: they meet across the C ABI, and both target the same
+# LE runtime. Verified by building an extension with the newer clang and
+# importing it into the interpreter built with the older one.
+#
+# Set ZOPEN_CLANG_ROOT to point at an install root holding <version>/bin/clang
+# if the compilers live somewhere unusual.
+_scipy_pick_compiler() {
+  _pc_want="$1"
+  _pc_fallback="$2"
+  "$(_zopen_python_interpreter_path "$3")" - "${_pc_want}" "${_pc_fallback}" <<'CCEOF'
+import glob
+import os
+import re
+import shutil
+import subprocess
+import sys
+
+want, fallback = sys.argv[1], sys.argv[2]
+
+roots = []
+if os.environ.get("ZOPEN_CLANG_ROOT"):
+    roots.append(os.environ["ZOPEN_CLANG_ROOT"])
+if fallback and os.path.exists(fallback):
+    # .../oelcpp/<version>/bin/clang -> .../oelcpp
+    roots.append(os.path.dirname(os.path.dirname(os.path.dirname(fallback))))
+roots += ["/usr/lpp/IBM/oelcpp", "/data/usr/lpp/IBM/oelcpp"]
+
+candidates = []
+for root in roots:
+    candidates += glob.glob(os.path.join(root, "*", "bin", want))
+on_path = shutil.which(want)
+if on_path:
+    candidates.append(on_path)
+if fallback:
+    candidates.append(fallback)
+
+best, best_version = None, ()
+for candidate in candidates:
+    if not os.access(candidate, os.X_OK):
+        continue
+    try:
+        out = subprocess.run([candidate, "--version"], capture_output=True,
+                             text=True, timeout=60).stdout
+    except Exception:
+        continue
+    # The banner carries IBM's product version before the clang version.
+    match = re.search(r"clang version (\d+(?:\.\d+)*)", out)
+    if not match:
+        continue
+    version = tuple(int(part) for part in match.group(1).split("."))
+    if version > best_version:
+        best, best_version = candidate, version
+
+if best and best_version >= (15,):
+    print(best)
+else:
+    print(fallback)
+CCEOF
+}
+
 _scipy_cc() {
-  "$(_zopen_python_interpreter_path "$1")" -c \
-    'import sysconfig; print(sysconfig.get_config_var("CC"))'
+  _cc_fallback=$("$(_zopen_python_interpreter_path "$1")" -c \
+    'import sysconfig; print(sysconfig.get_config_var("CC"))')
+  _scipy_pick_compiler "clang" "${_cc_fallback}" "$1"
 }
 
 _scipy_cxx() {
-  "$(_zopen_python_interpreter_path "$1")" -c \
-    'import sysconfig; print(sysconfig.get_config_var("CXX") or sysconfig.get_config_var("CC"))'
+  _cxx_fallback=$("$(_zopen_python_interpreter_path "$1")" -c \
+    'import sysconfig; print(sysconfig.get_config_var("CXX") or sysconfig.get_config_var("CC"))')
+  _scipy_pick_compiler "clang++" "${_cxx_fallback}" "$1"
 }
 
 _scipy_zos_flags() {
