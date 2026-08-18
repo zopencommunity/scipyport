@@ -42,9 +42,15 @@ export ZOPEN_DEV_URL="https://github.com/scipy/scipy.git"
 # scipy carries its vendored dependencies (boost, highs, ...) as submodules.
 export ZOPEN_CLONE_SUBMODULES="yes"
 
-export ZOPEN_STABLE_DEPS="check_python meson ninja pkgconfig curl git patch fortran lapack blis"
+# numpy is a *build* dependency, not just a runtime one: scipy's pyproject
+# requires it, and so does pythran. It has to be declared here or zopen never
+# puts it on PYTHONPATH for the build, and the four build helpers then fail to
+# install with "Could not find a version that satisfies the requirement numpy
+# (from pythran) (from versions: none)" -- PyPI has no numpy wheel for this
+# platform, so pip cannot fall back to downloading one.
+export ZOPEN_STABLE_DEPS="check_python numpy meson ninja pkgconfig curl git patch fortran lapack blis"
 export ZOPEN_DEV_DEPS="${ZOPEN_STABLE_DEPS}"
-export ZOPEN_RUNTIME_DEPS="check_python"
+export ZOPEN_RUNTIME_DEPS="check_python numpy"
 export ZOPEN_CATEGORIES="development library math"
 
 export ZOPEN_PYTHON_VERSIONS="3.12 3.13 3.14"
@@ -130,18 +136,6 @@ PCEOF
   echo "${_pc_dir}"
 }
 
-# Where the BLAS and LAPACK .pc files live, so meson can resolve -Dblas/-Dlapack.
-_scipy_math_pkgconfig() {
-  _mp=""
-  for _dep in lapack blis; do
-    for _d in "${PWD}/../${_dep}/lib/pkgconfig" \
-              "$(dirname "${ZOPEN_INSTALL_DIR}")/../${_dep}/${_dep}/lib/pkgconfig"; do
-      [ -d "${_d}" ] && _mp="${_mp}${_mp:+:}${_d}"
-    done
-  done
-  echo "${_mp}"
-}
-
 zopen_pre_build() {
   # The sources are ASCII; tag them so z/OS tools do not read them as EBCDIC.
   find . -type f \( -name '*.c' -o -name '*.h' -o -name '*.cpp' -o -name '*.hpp' \
@@ -169,7 +163,10 @@ zopen_custom_build() {
 
     _sb_pc="$(_scipy_pkgconfig_dir "${_sb_pv}")" \
       || { printSoftError "Could not write a corrected python-${_sb_pv}.pc"; _sb_rc=1; deactivate; break; }
-    PKG_CONFIG_PATH="${_sb_pc}$(_scipy_math_pkgconfig | sed 's/^/:/')${PKG_CONFIG_PATH:+:${PKG_CONFIG_PATH}}"
+    # blis and lapack are declared dependencies, so zopen has already put their
+    # lib/pkgconfig and share/pkgconfig on PKG_CONFIG_PATH. Only the corrected
+    # python-<version>.pc needs prepending, ahead of the interpreter's own.
+    PKG_CONFIG_PATH="${_sb_pc}${PKG_CONFIG_PATH:+:${PKG_CONFIG_PATH}}"
     export PKG_CONFIG_PATH
 
     CC="$(_scipy_cc "${_sb_pv}")"
@@ -202,4 +199,187 @@ zopen_custom_build() {
     [ ${_sb_rc} -eq 0 ] || break
   done
   return ${_sb_rc}
+}
+
+# scipy's own test suite is not run here. It needs pytest and hypothesis for
+# every interpreter, and hypothesis cannot be installed on this platform yet
+# (its build backend is maturin, which needs a Rust toolchain that does not
+# exist here). Running a smoke check that exercises the parts this port exists
+# to get right is more useful than a suite that cannot start.
+zopen_python_test() {
+  SCIPY_EXPECTED_VERSION="${SCIPY_VERSION}" python - <<'PYEOF'
+import os
+import sys
+import tempfile
+
+print("Running tests with Python %s" % sys.version.split()[0])
+
+# zopen's environment leaves PYTHONPATH with a leading empty entry, because
+# ports build it as "${PYTHONPATH}:..." from an unset variable. Python expands
+# that to the working directory at interpreter startup, which puts the *source
+# tree* on sys.path -- and scipy's package sits at the repository root, so it
+# shadows the installed wheel and fails with an import error that reads like a
+# broken build. Remove the source directory by name; dropping "" is too late.
+_src = os.path.realpath(os.getcwd())
+os.chdir(tempfile.gettempdir())
+sys.path = [p for p in sys.path
+            if p not in ("", ".") and os.path.realpath(p) != _src]
+
+failures = 0
+total = 0
+
+
+def check(label, fn):
+    global failures, total
+    total += 1
+    try:
+        if fn():
+            print("PASS:", label)
+        else:
+            print("FAIL:", label, file=sys.stderr)
+            failures += 1
+    except Exception as exc:
+        print("FAIL:", label, "-", exc, file=sys.stderr)
+        failures += 1
+
+
+try:
+    import numpy as np
+    import scipy
+except ImportError as exc:
+    # The failure this port exists to prevent looks exactly like this, and the
+    # message names Unicode rather than the compiler: extensions built with
+    # EBCDIC string literals import as mojibake.
+    print("FAIL: import scipy -", exc, file=sys.stderr)
+    print("scipy FAILED to import on Python %s -- 0 passed, 1 failed"
+          % sys.version.split()[0])
+    sys.exit(1)
+
+check("version is the one this port builds",
+      lambda: scipy.__version__ == os.environ["SCIPY_EXPECTED_VERSION"])
+
+# linalg is the whole point of pairing this with BLIS and LAPACK: unlike numpy,
+# which falls back to its bundled lapack_lite, these calls go through the real
+# libraries. A wrong result here means the Fortran symbol mangling is wrong.
+from scipy import linalg
+
+check("linalg.solve",
+      lambda: np.allclose(linalg.solve(np.array([[3., 1.], [1., 2.]]),
+                                       np.array([9., 8.])),
+                          np.array([2., 3.])))
+
+check("linalg.det",
+      lambda: abs(linalg.det(np.array([[4., 7.], [2., 6.]])) - 10.0) < 1e-9)
+
+check("linalg.inv round-trips",
+      lambda: np.allclose(np.array([[4., 7.], [2., 6.]])
+                          @ linalg.inv(np.array([[4., 7.], [2., 6.]])),
+                          np.eye(2)))
+
+check("linalg.eigh on a symmetric matrix",
+      lambda: np.allclose(sorted(linalg.eigh(np.array([[2., 1.], [1., 2.]]))[0]),
+                          [1.0, 3.0]))
+
+check("linalg.svd reconstructs",
+      lambda: (lambda a: np.allclose(
+          (lambda u, s, vt: u @ np.diag(s) @ vt)(*linalg.svd(a, full_matrices=False)), a))(
+              np.array([[1., 2.], [3., 4.], [5., 6.]])))
+
+check("linalg.cholesky",
+      lambda: np.allclose(linalg.cholesky(np.array([[4., 2.], [2., 3.]]), lower=True)
+                          @ linalg.cholesky(np.array([[4., 2.], [2., 3.]]), lower=True).T,
+                          np.array([[4., 2.], [2., 3.]])))
+
+check("linalg.lu_factor / lu_solve",
+      lambda: np.allclose(
+          linalg.lu_solve(linalg.lu_factor(np.array([[3., 1.], [1., 2.]])),
+                          np.array([9., 8.])),
+          np.array([2., 3.])))
+
+# Cython extensions
+from scipy import sparse
+check("sparse matmul (Cython)",
+      lambda: (sparse.csr_matrix(np.eye(3)) @ np.array([1., 2., 3.])).tolist()
+              == [1.0, 2.0, 3.0])
+
+check("sparse.linalg.spsolve",
+      lambda: np.allclose(
+          __import__("scipy.sparse.linalg", fromlist=["spsolve"]).spsolve(
+              sparse.csc_matrix(np.array([[3., 1.], [1., 2.]])),
+              np.array([9., 8.])),
+          np.array([2., 3.])))
+
+# pythran-generated C++
+from scipy import optimize
+check("optimize.brentq",
+      lambda: abs(optimize.brentq(lambda x: x * x - 2.0, 0.0, 2.0)
+                  - 2.0 ** 0.5) < 1e-9)
+
+check("optimize.minimize converges",
+      lambda: abs(optimize.minimize(lambda v: (v[0] - 3.0) ** 2,
+                                    [0.0]).x[0] - 3.0) < 1e-6)
+
+from scipy import fft as sfft
+check("fft round-trips",
+      lambda: np.allclose(
+          sfft.ifft(sfft.fft(np.array([1., 2., 3., 4.]))).real,
+          np.array([1., 2., 3., 4.])))
+
+from scipy import stats
+check("stats.norm.cdf",
+      lambda: abs(stats.norm.cdf(0.0) - 0.5) < 1e-12)
+
+check("stats.ttest_1samp runs",
+      lambda: stats.ttest_1samp(np.array([1., 2., 3., 4., 5.]), 3.0).pvalue > 0.9)
+
+from scipy import interpolate
+# CubicSpline rather than interp1d: interp1d is legacy, and a smoke check should
+# not be the thing that breaks on a deprecation.
+check("interpolate.CubicSpline",
+      lambda: abs(float(interpolate.CubicSpline([0., 1., 2., 3.],
+                                                [0., 10., 20., 30.])(1.5))
+                  - 15.0) < 1e-6)
+
+from scipy import integrate
+check("integrate.quad",
+      lambda: abs(integrate.quad(lambda x: x * x, 0.0, 3.0)[0] - 9.0) < 1e-9)
+
+# z/OS is big-endian and few builds exercise that path.
+check("native byte order is big-endian",
+      lambda: sys.byteorder == "big")
+
+check("byteswap round-trips through scipy",
+      lambda: linalg.norm(np.array([3., 4.]).astype(">f8")) == 5.0)
+
+print("scipy %s on Python %s -- %d passed, %d failed" % (
+    scipy.__version__, sys.version.split()[0], total - failures, failures))
+sys.exit(1 if failures else 0)
+PYEOF
+}
+
+zopen_check_results() {
+  dir="$1"; pfx="$2"; chk="${dir}/${pfx}_check.log"
+  # No "|| echo 0": grep -c prints 0 when nothing matches and also exits 1, so
+  # the fallback appends a second zero and the arithmetic dies.
+  passed=$(grep -c "^PASS:" "${chk}" 2> /dev/null)
+  failed=$(grep -c "^FAIL:" "${chk}" 2> /dev/null)
+  passed=${passed:-0}
+  failed=${failed:-0}
+
+  # An interpreter whose script dies before the first check contributes no PASS
+  # and no FAIL, so counting those alone would score a crash as a clean run.
+  interpreters=$(grep -c "Running tests with Python" "${chk}" 2> /dev/null)
+  reported=$(grep -c "^scipy .* on Python" "${chk}" 2> /dev/null)
+  interpreters=${interpreters:-0}
+  reported=${reported:-0}
+  silent=$((interpreters - reported))
+  if [ "${silent}" -gt 0 ]; then
+    failed=$((failed + silent))
+  fi
+
+cat <<ZZ
+actualFailures:${failed}
+totalTests:$((passed + failed))
+expectedFailures:0
+ZZ
 }
