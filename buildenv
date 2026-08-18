@@ -149,6 +149,23 @@ zopen_custom_build() {
   _zopen_python_verify_interpreters || return 1
   rm -rf dist
 
+  # meson-python declares a dependency on meson, so pip installs one from PyPI
+  # into each venv and the venv's bin/ shadows the ported meson on PATH. The
+  # PyPI build has no z/OS support and the build dies at
+  #
+  #   ERROR: Unable to detect linker for compiler `... -Wl,--version ...`
+  #
+  # even though the binder's IEW5033 is right there in the probe's stderr --
+  # that is precisely what mesonport patches teach meson to recognise. Capture
+  # the ported meson now, before any venv is on PATH, and point meson-python at
+  # it: the MESON environment variable overrides everything else it would try.
+  _sb_meson=$(command -v meson)
+  [ -n "${_sb_meson}" ] \
+    || printError "meson is not on PATH -- is the meson port a build dependency?"
+  MESON="${_sb_meson}"
+  export MESON
+  printVerbose "MESON=${MESON} ($(${MESON} --version 2>/dev/null))"
+
   _sb_rc=0
   for _sb_pv in $(_zopen_python_versions); do
     printHeader "Building wheel with Python ${_sb_pv}"
