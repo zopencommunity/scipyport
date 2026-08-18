@@ -1,0 +1,205 @@
+# bump: scipy-version /SCIPY_VERSION="(.*)"/ https://github.com/scipy/scipy.git|semver:*
+SCIPY_VERSION="1.18.0"
+
+###
+### Build control file for scipyport
+###
+### scipy sits on top of everything else in the numerical stack: numpy for
+### arrays, BLIS for BLAS, lapack for LAPACK, meson for the build, and the
+### fortran port for the four Fortran sources that remain.
+###
+### Unlike numpyport this port does not carry meson patches. numpy vendors its
+### own fork of meson; scipy uses the system one, so the z/OS support in
+### mesonport -- including its Fortran compiler class -- applies directly.
+###
+### Three things are handled below.
+###
+###   1. Build backend and helpers. scipy builds through meson-python and needs
+###      Cython, pybind11 and pythran. All four have pure-Python wheels at the
+###      versions scipy pins, so they install without compiling anything. They
+###      go into the venv rather than being resolved by build isolation, so the
+###      build uses the system meson rather than fetching its own.
+###
+###   2. String literal encoding. The C compiler emits EBCDIC literals by
+###      default while the interpreter is an ASCII build, so extensions compile,
+###      link and install perfectly and then fail to import. The flags come from
+###      sysconfig plus -fzos-le-char-mode=ascii; setuptools passes these for
+###      extension builds, meson does not.
+###
+###   3. Python symbols and metadata. Extensions must bind against the
+###      interpreter's side deck, and the shipped pkg-config files and LIBDIR
+###      name the machine the interpreter was built on rather than where it is
+###      installed. Both are recomputed per interpreter. Same as numpyport.
+###
+
+export ZOPEN_PROJECT_NAME="scipy"
+
+export ZOPEN_BUILD_LINE="STABLE"
+export ZOPEN_STABLE_URL="https://github.com/scipy/scipy.git"
+export ZOPEN_STABLE_TAG="v${SCIPY_VERSION}"
+export ZOPEN_DEV_URL="https://github.com/scipy/scipy.git"
+
+# scipy carries its vendored dependencies (boost, highs, ...) as submodules.
+export ZOPEN_CLONE_SUBMODULES="yes"
+
+export ZOPEN_STABLE_DEPS="check_python meson ninja pkgconfig curl git patch fortran lapack blis"
+export ZOPEN_DEV_DEPS="${ZOPEN_STABLE_DEPS}"
+export ZOPEN_RUNTIME_DEPS="check_python"
+export ZOPEN_CATEGORIES="development library math"
+
+export ZOPEN_PYTHON_VERSIONS="3.12 3.13 3.14"
+export ZOPEN_BUILD_SYSTEM="Python"
+
+# The compiler is taken from sysconfig per interpreter, not from zopen.
+export ZOPEN_COMP="skip"
+export ZOPEN_CONFIGURE="skip"
+export ZOPEN_MAKE="zopen_custom_build"
+
+# BLAS is BLIS; LAPACK is the reference build. Both are found through
+# pkg-config, which is why each ships a .pc.
+SCIPY_MESON_ARGS="-Dblas=blis -Dlapack=lapack"
+
+zopen_get_version() {
+  echo "${SCIPY_VERSION}"
+}
+
+# --- per-interpreter facts, all recomputed rather than trusted -------------
+
+_scipy_cc() {
+  "$(_zopen_python_interpreter_path "$1")" -c \
+    'import sysconfig; print(sysconfig.get_config_var("CC"))'
+}
+
+_scipy_cxx() {
+  "$(_zopen_python_interpreter_path "$1")" -c \
+    'import sysconfig; print(sysconfig.get_config_var("CXX") or sysconfig.get_config_var("CC"))'
+}
+
+_scipy_zos_flags() {
+  "$(_zopen_python_interpreter_path "$1")" -c '
+import sysconfig
+base = sysconfig.get_config_var("CFLAGS") or ""
+print(base + " -m64 -fvisibility=default -fzos-le-char-mode=ascii -fno-short-enums")
+'
+}
+
+# The directory actually holding libpython<version>.x. LIBDIR records where the
+# interpreter was built, which is not always where it lives.
+_scipy_python_libdir() {
+  "$(_zopen_python_interpreter_path "$1")" -c '
+import os, sys, sysconfig
+version = sysconfig.get_config_var("VERSION")
+candidates = [os.path.join(getattr(sys, "base_prefix", sys.prefix), "lib")]
+libdir = sysconfig.get_config_var("LIBDIR")
+if libdir:
+    candidates.append(libdir)
+for candidate in candidates:
+    if os.path.exists(os.path.join(candidate, "libpython%s.x" % version)):
+        print(candidate)
+        break
+else:
+    sys.exit("no libpython%s.x found in: %s" % (version, ", ".join(candidates)))
+'
+}
+
+# A corrected python-<version>.pc, ahead of the shipped one on PKG_CONFIG_PATH.
+_scipy_pkgconfig_dir() {
+  _pc_pv="$1"
+  _pc_dir="${PWD}/.zopen-pkgconfig/${_pc_pv}"
+  mkdir -p "${_pc_dir}" || return 1
+  "$(_zopen_python_interpreter_path "${_pc_pv}")" - "${_pc_dir}" <<'PCEOF'
+import os, sys, sysconfig
+out_dir = sys.argv[1]
+version = sysconfig.get_config_var("VERSION")
+prefix = getattr(sys, "base_prefix", sys.prefix)
+libdir = os.path.join(prefix, "lib")
+if not os.path.isdir(libdir):
+    libdir = sysconfig.get_config_var("LIBDIR") or os.path.join(prefix, "lib")
+incdir = os.path.dirname(sysconfig.get_paths()["include"])
+with open(os.path.join(out_dir, "python-%s.pc" % version), "w") as fh:
+    fh.write(
+        "# Regenerated from sysconfig by scipyport: the shipped file names the\n"
+        "# machine this interpreter was built on, not where it is installed.\n"
+        "prefix=%s\nexec_prefix=${prefix}\nlibdir=%s\nincludedir=%s\n\n"
+        "Name: Python\nDescription: Build a C extension for Python\n"
+        "Requires:\nVersion: %s\nLibs.private:\nLibs: -L${libdir}\n"
+        "Cflags: -I${includedir}/python%s\n"
+        % (prefix, libdir, incdir, version, version))
+PCEOF
+  [ -f "${_pc_dir}/python-${_pc_pv}.pc" ] || return 1
+  echo "${_pc_dir}"
+}
+
+# Where the BLAS and LAPACK .pc files live, so meson can resolve -Dblas/-Dlapack.
+_scipy_math_pkgconfig() {
+  _mp=""
+  for _dep in lapack blis; do
+    for _d in "${PWD}/../${_dep}/lib/pkgconfig" \
+              "$(dirname "${ZOPEN_INSTALL_DIR}")/../${_dep}/${_dep}/lib/pkgconfig"; do
+      [ -d "${_d}" ] && _mp="${_mp}${_mp:+:}${_d}"
+    done
+  done
+  echo "${_mp}"
+}
+
+zopen_pre_build() {
+  # The sources are ASCII; tag them so z/OS tools do not read them as EBCDIC.
+  find . -type f \( -name '*.c' -o -name '*.h' -o -name '*.cpp' -o -name '*.hpp' \
+       -o -name '*.pyx' -o -name '*.pxd' -o -name '*.py' -o -name '*.f' \
+       -o -name '*.build' -o -name '*.toml' \) \
+    -exec chtag -tc ISO8859-1 {} + 2> /dev/null
+  return 0
+}
+
+zopen_custom_build() {
+  _zopen_python_verify_interpreters || return 1
+  rm -rf dist
+
+  _sb_rc=0
+  for _sb_pv in $(_zopen_python_versions); do
+    printHeader "Building wheel with Python ${_sb_pv}"
+    _zopen_python_ensure_venv_for "${_sb_pv}" || { _sb_rc=1; break; }
+
+    # scipy's build requirements, pinned by its pyproject. Every one of these
+    # has a pure-Python wheel, so nothing is compiled to install them.
+    pip install --disable-pip-version-check --quiet --only-binary=:all: \
+      "meson-python>=0.15.0,<0.22.0" "Cython>=3.2.0,<3.3.0" \
+      "pybind11>=2.13.2,<3.1.0" "pythran>=0.18.1,<0.19.0" \
+      || { _sb_rc=1; deactivate; break; }
+
+    _sb_pc="$(_scipy_pkgconfig_dir "${_sb_pv}")" \
+      || { printSoftError "Could not write a corrected python-${_sb_pv}.pc"; _sb_rc=1; deactivate; break; }
+    PKG_CONFIG_PATH="${_sb_pc}$(_scipy_math_pkgconfig | sed 's/^/:/')${PKG_CONFIG_PATH:+:${PKG_CONFIG_PATH}}"
+    export PKG_CONFIG_PATH
+
+    CC="$(_scipy_cc "${_sb_pv}")"
+    CXX="$(_scipy_cxx "${_sb_pv}")"
+    export CC CXX
+    CFLAGS="$(_scipy_zos_flags "${_sb_pv}")"
+    CXXFLAGS="${CFLAGS}"
+    LDFLAGS="$(_scipy_python_libdir "${_sb_pv}")/libpython${_sb_pv}.x"
+    export CFLAGS CXXFLAGS LDFLAGS
+    # FC comes from the fortran port's environment; meson needs it on PATH.
+    printVerbose "PKG_CONFIG_PATH=${PKG_CONFIG_PATH}"
+    printVerbose "CC=${CC}  FC=${FC:-unset}"
+    printVerbose "LDFLAGS=${LDFLAGS}"
+
+    # shellcheck disable=SC2086
+    python -m build --wheel --no-isolation \
+      $(for _sb_a in ${SCIPY_MESON_ARGS}; do echo "-Csetup-args=${_sb_a}"; done)
+    _sb_rc=$?
+
+    if [ ${_sb_rc} -eq 0 ]; then
+      _zopen_python_retag_wheel
+      _sb_rc=$?
+    fi
+    if [ ${_sb_rc} -eq 0 ]; then
+      _zopen_python_stamp_wheel
+      _sb_rc=$?
+    fi
+
+    deactivate
+    [ ${_sb_rc} -eq 0 ] || break
+  done
+  return ${_sb_rc}
+}
