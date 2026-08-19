@@ -21,6 +21,7 @@ this working across HiGHS versions rather than breaking on line numbers.
 
 Idempotent, and fails loudly if the code no longer looks the way it expects.
 """
+import os
 import sys
 
 MARKER = "__MVS__"
@@ -163,6 +164,42 @@ def patch(path, frm, to, what):
     print("  patched: %s" % what)
 
 
+def sweep_boost_math(root):
+    """Drop thread_local from Boost.Math's function-local constants.
+
+        hypergeometric_1F1.hpp:637: error: initializer for thread-local
+        variable must be a constant expression
+
+    z/OS requires a thread_local to be constant-initialised, and these are not:
+
+        static const thread_local long long max_scaling =
+            lltrunc(boost::math::tools::log_max_value<T>()) - 2;
+
+    They are const, function-local, and derived only from the type -- every
+    thread would compute the same value -- so an ordinary static is both correct
+    and thread-safe here, C++11 guaranteeing the initialisation is run once.
+
+    Swept across the tree rather than fixed line by line: the build only reveals
+    them one template instantiation at a time, and there are several.
+    """
+    import os
+
+    changed = 0
+    for dirpath, _dirnames, filenames in os.walk(root):
+        for name in filenames:
+            if not name.endswith((".hpp", ".ipp", ".h")):
+                continue
+            path = os.path.join(dirpath, name)
+            with open(path, "r", encoding="utf-8", errors="surrogateescape") as fh:
+                text = fh.read()
+            if "static const thread_local " not in text:
+                continue
+            with open(path, "w", encoding="utf-8", errors="surrogateescape") as fh:
+                fh.write(text.replace("static const thread_local ", "static const "))
+            changed += 1
+    print("  boost_math: dropped thread_local from constants in %d file(s)" % changed)
+
+
 def main():
     scipy_root = sys.argv[1]
     highs = scipy_root + "/subprojects/highs"
@@ -172,6 +209,9 @@ def main():
           CPP_ANCHOR, CPP_INSERT, "HiGHS thread-local definitions")
     patch(scipy_root + "/scipy/_lib/_uarray/_uarray_dispatch.cxx",
           UARRAY_FROM, UARRAY_TO, "_uarray thread-local state")
+    boost = scipy_root + "/subprojects/boost_math"
+    if os.path.isdir(boost):
+        sweep_boost_math(boost)
 
 
 if __name__ == "__main__":
