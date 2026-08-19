@@ -390,8 +390,17 @@ print(os.path.join(os.path.dirname(numpy.__file__), "_core", "lib", "pkgconfig")
     printVerbose "CC=${CC}  FC=${FC:-unset}"
     printVerbose "LDFLAGS=${LDFLAGS}"
 
+    # -Cbuild-dir keeps meson's build tree, and therefore its log. Without it
+    # meson-python uses tempfile.TemporaryDirectory(prefix='.mesonpy-'), which
+    # is removed when the build fails -- so the log meson tells you to read has
+    # already been deleted by the time anyone looks, which is why every failure
+    # so far has shown only "failed with status 1".
+    _sb_builddir="${PWD}/.zopen-mesonbuild-${_sb_pv}"
+    rm -rf "${_sb_builddir}"
+
     # shellcheck disable=SC2086
     python -m build --wheel --no-isolation \
+      "-Cbuild-dir=${_sb_builddir}" \
       $(for _sb_a in ${SCIPY_MESON_ARGS}; do echo "-Csetup-args=${_sb_a}"; done)
     _sb_rc=$?
 
@@ -399,13 +408,15 @@ print(os.path.join(os.path.dirname(numpy.__file__), "_core", "lib", "pkgconfig")
     # not. When a configure step fails, that log is the only place the actual
     # error appears, and the pipeline deletes the workspace straight afterwards.
     if [ ${_sb_rc} -ne 0 ]; then
-      for _sb_log in .mesonpy-*/meson-logs/meson-log.txt; do
-        [ -f "${_sb_log}" ] || continue
+      _sb_log="${_sb_builddir}/meson-logs/meson-log.txt"
+      if [ -f "${_sb_log}" ]; then
         printInfo "- tail of ${_sb_log}:"
-        tail -40 "${_sb_log}" 2> /dev/null | while read -r _sb_line; do
+        tail -60 "${_sb_log}" 2> /dev/null | while read -r _sb_line; do
           printInfo "    ${_sb_line}"
         done
-      done
+      else
+        printInfo "- no meson log at ${_sb_log}"
+      fi
     fi
 
     if [ ${_sb_rc} -eq 0 ]; then
