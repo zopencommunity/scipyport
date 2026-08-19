@@ -233,6 +233,13 @@ zopen_custom_build() {
   # that is precisely what mesonport patches teach meson to recognise. Capture
   # the ported meson now, before any venv is on PATH, and point meson-python at
   # it: the MESON environment variable overrides everything else it would try.
+  # A venv's console scripts are written ASCII-tagged, and z/OS only honours
+  # the shebang of such a file when this is on -- otherwise the shell runs it
+  # as a shell script and reports "FSUM7332 syntax error". scipy runs f2py
+  # through meson's run_command, so it has to work.
+  _BPXK_AUTOCVT=ON
+  export _BPXK_AUTOCVT
+
   _sb_meson=$(command -v meson)
   [ -n "${_sb_meson}" ] \
     || printError "meson is not on PATH -- is the meson port a build dependency?"
@@ -259,6 +266,22 @@ zopen_custom_build() {
 
     _sb_pc="$(_scipy_pkgconfig_dir "${_sb_pv}")" \
       || { printSoftError "Could not write a corrected python-${_sb_pv}.pc"; _sb_rc=1; deactivate; break; }
+
+    # meson resolves dependency('numpy') by pkg-config first and the
+    # numpy-config executable second. Give it the pkg-config file numpy ships
+    # inside the wheel: the executable route needs the console script to run,
+    # and a venv's console scripts are ASCII-tagged, so z/OS only honours their
+    # shebang when _BPXK_AUTOCVT=ON. Without this the build stops at
+    #
+    #   numpy-config found: NO
+    #   Run-time dependency numpy found: NO (tried pkg-config and config-tool)
+    _sb_nppc=$(python -c 'import os, numpy
+print(os.path.join(os.path.dirname(numpy.__file__), "_core", "lib", "pkgconfig"))' 2> /dev/null)
+    if [ -n "${_sb_nppc}" ] && [ -d "${_sb_nppc}" ]; then
+      _sb_pc="${_sb_pc}:${_sb_nppc}"
+    else
+      printSoftError "numpy ships no pkgconfig directory; dependency('numpy') may not resolve"
+    fi
     # blis and lapack are declared dependencies, so zopen has already put their
     # lib/pkgconfig and share/pkgconfig on PKG_CONFIG_PATH. Only the corrected
     # python-<version>.pc needs prepending, ahead of the interpreter's own.
