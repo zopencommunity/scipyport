@@ -334,6 +334,22 @@ zopen_custom_build() {
     _scipy_fix_venv_scripts "$(dirname "$(command -v python)")" \
       || { _sb_rc=1; deactivate; break; }
 
+    # Replace f2py with a /bin/sh wrapper. Converting the Python console script
+    # to EBCDIC makes it runnable from a shell, but meson still reported
+    # "Command ... f2py -v failed with status 1" -- so rather than keep guessing
+    # at how meson invokes it, remove the dependence on shebang handling
+    # entirely: "#!/bin/sh" is honoured unconditionally, and the wrapper calls
+    # the interpreter explicitly. Verified with autoconvert off: returns 2.5.2,
+    # rc=0.
+    _sb_venvbin="$(dirname "$(command -v python)")"
+    _sb_py="${_sb_venvbin}/python"
+    cat > "${_sb_venvbin}/f2py" <<ZZ
+#!/bin/sh
+exec "${_sb_py}" -m numpy.f2py "\$@"
+ZZ
+    chtag -tc IBM-1047 "${_sb_venvbin}/f2py"
+    chmod +x "${_sb_venvbin}/f2py"
+
     f2py -v > /dev/null 2>&1 \
       || { printSoftError "f2py does not run after fixing the venv scripts"; _sb_rc=1; deactivate; break; }
     printInfo "- f2py: $(command -v f2py) ($(f2py -v 2>&1 | head -1))"
@@ -378,6 +394,19 @@ print(os.path.join(os.path.dirname(numpy.__file__), "_core", "lib", "pkgconfig")
     python -m build --wheel --no-isolation \
       $(for _sb_a in ${SCIPY_MESON_ARGS}; do echo "-Csetup-args=${_sb_a}"; done)
     _sb_rc=$?
+
+    # meson records the stderr of everything it runs; the console output does
+    # not. When a configure step fails, that log is the only place the actual
+    # error appears, and the pipeline deletes the workspace straight afterwards.
+    if [ ${_sb_rc} -ne 0 ]; then
+      for _sb_log in .mesonpy-*/meson-logs/meson-log.txt; do
+        [ -f "${_sb_log}" ] || continue
+        printInfo "- tail of ${_sb_log}:"
+        tail -40 "${_sb_log}" 2> /dev/null | while read -r _sb_line; do
+          printInfo "    ${_sb_line}"
+        done
+      done
+    fi
 
     if [ ${_sb_rc} -eq 0 ]; then
       _zopen_python_retag_wheel
