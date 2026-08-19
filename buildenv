@@ -264,6 +264,31 @@ zopen_custom_build() {
       "pybind11>=2.13.2,<3.1.0" "pythran>=0.18.1,<0.19.0" \
       || { _sb_rc=1; deactivate; break; }
 
+    # scipy runs f2py through meson's find_program, which searches PATH, so
+    # numpy's console scripts have to be in this venv. pip writes them only if
+    # it actually installs numpy here -- if it decides numpy is already
+    # satisfied (a stray PYTHONPATH entry is enough) it writes nothing, and the
+    # build fails much later and far less clearly with
+    #
+    #   ERROR: Program 'f2py' not found or not executable
+    #
+    # so check now, say what was found, and force the install if needed.
+    printVerbose "PYTHONPATH=${PYTHONPATH:-(unset)}"
+    printVerbose "numpy in venv: $(python -c 'import numpy; print(numpy.__file__)' 2> /dev/null || echo none)"
+    if ! command -v f2py > /dev/null 2>&1; then
+      printInfo "- f2py is not on PATH after installing; forcing numpy into the venv"
+      pip install --disable-pip-version-check --quiet --only-binary=:all: \
+        --ignore-installed \
+        --extra-index-url https://repo.zopen.community/pypi/wheels/simple/ \
+        "numpy>=2.0.0,<2.8" \
+        || { printSoftError "Could not install numpy into the venv"; _sb_rc=1; deactivate; break; }
+    fi
+    if ! command -v f2py > /dev/null 2>&1; then
+      printSoftError "f2py is still not on PATH; scipy cannot be configured without it"
+      _sb_rc=1; deactivate; break
+    fi
+    printInfo "- f2py: $(command -v f2py) ($(f2py -v 2>&1 | head -1))"
+
     _sb_pc="$(_scipy_pkgconfig_dir "${_sb_pv}")" \
       || { printSoftError "Could not write a corrected python-${_sb_pv}.pc"; _sb_rc=1; deactivate; break; }
 
