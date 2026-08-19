@@ -462,6 +462,26 @@ print(os.path.join(os.path.dirname(numpy.__file__), "_core", "lib", "pkgconfig")
       else
         printInfo "- no meson log at ${_sb_log}"
       fi
+
+      # meson-python captures meson's stderr and does not forward it, so a
+      # crash inside meson shows only "Unhandled python exception" with no
+      # location -- even with MESON_FORCE_BACKTRACE set, because the traceback
+      # goes to that captured stderr. Re-run meson setup directly, reusing the
+      # native file meson-python left behind, so the traceback reaches the log.
+      _sb_native="${_sb_builddir}/meson-python-native-file.ini"
+      if [ -f "${_sb_native}" ]; then
+        printInfo "- re-running meson setup directly to capture the traceback:"
+        rm -rf "${_sb_builddir}.diag"
+        # shellcheck disable=SC2086
+        "${MESON}" setup "${_sb_builddir}.diag" \
+          --native-file="${_sb_native}" \
+          $(for _sb_a in ${SCIPY_MESON_ARGS}; do echo "${_sb_a}"; done) 2>&1 \
+          | tail -45 | while read -r _sb_line; do
+              printInfo "    ${_sb_line}"
+            done
+      else
+        printInfo "- no native file at ${_sb_native}; cannot re-run meson directly"
+      fi
     fi
 
     if [ ${_sb_rc} -eq 0 ]; then
