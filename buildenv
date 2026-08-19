@@ -269,6 +269,19 @@ print("yes" if data == b"#!" else "no")
 }
 
 zopen_pre_build() {
+  # HiGHS uses a thread_local whose type has a destructor, which IBM's clang
+  # rejects outright -- see patches/highs_zos_tls.py for what that costs and how
+  # it is replaced. Done here rather than through patches/ because HiGHS is a
+  # submodule and zopen-build applies that directory with git apply, which
+  # refuses paths inside one.
+  if [ -d subprojects/highs ]; then
+    _sb_pyexe=$(_zopen_python_interpreter_path "$(_zopen_python_primary_version)") \
+      || { printSoftError "no interpreter to run the HiGHS patch"; return 1; }
+    printInfo "- patching vendored HiGHS for z/OS thread-local rules"
+    "${_sb_pyexe}" "${ZOPEN_ROOT}/patches/highs_zos_tls.py" "${PWD}/subprojects/highs" \
+      || { printSoftError "could not patch HiGHS"; return 1; }
+  fi
+
   # The sources are ASCII; tag them so z/OS tools do not read them as EBCDIC.
   find . -type f \( -name '*.c' -o -name '*.h' -o -name '*.cpp' -o -name '*.hpp' \
        -o -name '*.pyx' -o -name '*.pxd' -o -name '*.py' -o -name '*.f' \
