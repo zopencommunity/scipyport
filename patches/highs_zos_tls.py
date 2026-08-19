@@ -200,6 +200,54 @@ def sweep_boost_math(root):
     print("  boost_math: dropped thread_local from constants in %d file(s)" % changed)
 
 
+def patch_ducc_threading(path):
+    """Make ducc0's active_pool constant-initialised.
+
+        threading.cc:413: error: initializer for thread-local variable must be
+        a constant expression
+
+        thread_local thread_pool *active_pool = get_master_pool();
+
+    Start it null instead and fill it in on first use. One of the two
+    definitions in this file already does exactly that in get_active_pool(); the
+    other asserts non-null instead, so it gets the same lazy fill rather than
+    beginning life null and tripping its own assertion.
+    """
+    if not os.path.exists(path):
+        print("  ducc threading.cc not present; skipping")
+        return
+    with open(path, "r", encoding="utf-8", errors="surrogateescape") as fh:
+        text = fh.read()
+    if "z/OS: constant-initialised" in text:
+        print("  already patched: ducc active_pool")
+        return
+
+    decl = "thread_local thread_pool *active_pool = get_master_pool();"
+    if decl not in text:
+        sys.exit("highs_zos_tls.py: ducc0's active_pool definition has changed; "
+                 "this needs revisiting")
+    text = text.replace(
+        decl,
+        "// z/OS: constant-initialised, then filled in on first use below.\n"
+        "thread_local thread_pool *active_pool = nullptr;")
+
+    # The branch that asserts rather than filling in lazily needs the fill too.
+    assert_only = ("thread_pool *get_active_pool()\n"
+                   "  {\n"
+                   "  MR_assert(active_pool!=nullptr, \"no thread pool active\");")
+    if assert_only in text:
+        text = text.replace(
+            assert_only,
+            "thread_pool *get_active_pool()\n"
+            "  {\n"
+            "  if (!active_pool) active_pool = get_master_pool();\n"
+            "  MR_assert(active_pool!=nullptr, \"no thread pool active\");")
+
+    with open(path, "w", encoding="utf-8", errors="surrogateescape") as fh:
+        fh.write(text)
+    print("  patched: ducc active_pool")
+
+
 def main():
     scipy_root = sys.argv[1]
     highs = scipy_root + "/subprojects/highs"
@@ -212,6 +260,7 @@ def main():
     boost = scipy_root + "/subprojects/boost_math"
     if os.path.isdir(boost):
         sweep_boost_math(boost)
+    patch_ducc_threading(scipy_root + "/subprojects/duccfft/ducc0/infra/threading.cc")
 
 
 if __name__ == "__main__":
