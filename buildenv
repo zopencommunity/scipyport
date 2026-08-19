@@ -42,13 +42,18 @@ export ZOPEN_DEV_URL="https://github.com/scipy/scipy.git"
 # scipy carries its vendored dependencies (boost, highs, ...) as submodules.
 export ZOPEN_CLONE_SUBMODULES="yes"
 
-# numpy is a *build* dependency, not just a runtime one: scipy's pyproject
-# requires it, and so does pythran. It has to be declared here or zopen never
-# puts it on PYTHONPATH for the build, and the four build helpers then fail to
-# install with "Could not find a version that satisfies the requirement numpy
-# (from pythran) (from versions: none)" -- PyPI has no numpy wheel for this
-# platform, so pip cannot fall back to downloading one.
-export ZOPEN_STABLE_DEPS="check_python numpy meson ninja pkgconfig curl git patch fortran lapack blis"
+# numpy is deliberately NOT a build dependency, even though the build needs it.
+# Declaring it puts it on PYTHONPATH, pip then considers it already installed
+# and puts none in the venv, and the build ends up using the zopen port's
+# console scripts -- whose shebangs name the system interpreter, so they only
+# work when PYTHONPATH is set. meson runs them without it and scipy dies at
+#
+#   ERROR: Command `.../bin/f2py -v` failed with status 1
+#
+# Installing numpy into the venv instead (from the zopen wheel index, below)
+# gives the self-contained environment scipy's meson.build expects: its own
+# f2py and numpy-config, resolving numpy from the venv with no PYTHONPATH.
+export ZOPEN_STABLE_DEPS="check_python meson ninja pkgconfig curl git patch fortran lapack blis"
 export ZOPEN_DEV_DEPS="${ZOPEN_STABLE_DEPS}"
 export ZOPEN_RUNTIME_DEPS="check_python numpy"
 export ZOPEN_CATEGORIES="development library math"
@@ -242,7 +247,12 @@ zopen_custom_build() {
 
     # scipy's build requirements, pinned by its pyproject. Every one of these
     # has a pure-Python wheel, so nothing is compiled to install them.
+    # numpy comes from the zopen wheel index -- PyPI has no wheel for this
+    # platform and there is no compiler-free way to build one here. Everything
+    # else is a pure-Python wheel at the versions scipy pins.
     pip install --disable-pip-version-check --quiet --only-binary=:all: \
+      --extra-index-url https://repo.zopen.community/pypi/wheels/simple/ \
+      "numpy>=2.0.0,<2.8" \
       "meson-python>=0.15.0,<0.22.0" "Cython>=3.2.0,<3.3.0" \
       "pybind11>=2.13.2,<3.1.0" "pythran>=0.18.1,<0.19.0" \
       || { _sb_rc=1; deactivate; break; }
