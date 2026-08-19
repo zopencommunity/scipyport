@@ -276,6 +276,36 @@ zopen_custom_build() {
   # that is precisely what mesonport patches teach meson to recognise. Capture
   # the ported meson now, before any venv is on PATH, and point meson-python at
   # it: the MESON environment variable overrides everything else it would try.
+  # Remove empty entries from PYTHONPATH before anything runs.
+  #
+  # zopen builds it as "${PYTHONPATH}:..." from an unset variable, so it arrives
+  # with a leading colon:
+  #
+  #   PYTHONPATH=:/data/zopen/usr/local/zopen/cryptography/...
+  #
+  # Python turns an empty entry into the *current directory* at interpreter
+  # startup. meson runs programs with the directory of the meson.build it is
+  # processing as cwd -- for scipy that is scipy/scipy -- so every interpreter
+  # meson starts gets scipy's own half-built package tree at the front of
+  # sys.path. The result is that the standard library stops working:
+  #
+  #   File ".../numpy/f2py/__init__.py", line 13, in <module>
+  #       import subprocess
+  #   File ".../python3.12/subprocess.py", line 49, in <module>
+  #       import signal
+  #   File ".../scipy/scipy/signal/__init__.py", line 307, in <module>
+  #   ModuleNotFoundError: No module named 'scipy'
+  #
+  # -- subprocess asked for the stdlib "signal" and got scipy.signal. That is
+  # what "f2py -v failed with status 1" was hiding, and why the same command
+  # succeeds when this port runs it: the port's cwd has no scipy package in it.
+  #
+  # The durable fix belongs in the zopen_append_to_env snippets that build this
+  # value ("${PYTHONPATH:+${PYTHONPATH}:}"), not here.
+  PYTHONPATH=$(echo "${PYTHONPATH}" | sed -e 's/^://' -e 's/:$//' -e 's/::*/:/g')
+  export PYTHONPATH
+  printVerbose "PYTHONPATH after removing empty entries: ${PYTHONPATH:-(empty)}"
+
   # A venv's console scripts are written ASCII-tagged, and z/OS only honours
   # the shebang of such a file when this is on -- otherwise the shell runs it
   # as a shell script and reports "FSUM7332 syntax error". scipy runs f2py
