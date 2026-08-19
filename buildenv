@@ -460,9 +460,14 @@ print(os.path.join(os.path.dirname(numpy.__file__), "_core", "lib", "pkgconfig")
     # "IEW5034 The archive library libxlf90.a cannot be found". The fortran port
     # publishes where they live.
     if [ -n "${XLF_LIBDIR}" ] && [ -d "${XLF_LIBDIR}" ]; then
-      LDFLAGS="${LDFLAGS} -L${XLF_LIBDIR}"
+      # The libraries as well as the directory. meson adds -lxlf90 and -lxl only
+      # for targets that compile Fortran sources; most of scipy's extensions
+      # compile C and link liblapack.a, which is Fortran, and meson has no way
+      # to know that. Those links fail with the Fortran runtime unresolved --
+      # _xlfBeginIO, _xlfWriteFmt, _xlcsqrtv and friends.
+      LDFLAGS="${LDFLAGS} -L${XLF_LIBDIR} -lxlf90 -lxl"
     else
-      printSoftError "XLF_LIBDIR is not set; linking Fortran with C++ will fail"
+      printSoftError "XLF_LIBDIR is not set; linking against LAPACK will fail"
     fi
     export CFLAGS CXXFLAGS LDFLAGS
     # FC comes from the fortran port's environment; meson needs it on PATH.
