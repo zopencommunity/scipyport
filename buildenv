@@ -210,6 +210,49 @@ PCEOF
   echo "${_pc_dir}"
 }
 
+# Make the venv's console scripts runnable regardless of the environment.
+#
+# pip writes them ASCII-tagged, and z/OS only honours the shebang of such a
+# file when _BPXK_AUTOCVT=ON. meson does not pass that through to the programs
+# it runs, so scipy's
+#
+#   run_command([f2py, '-v'], check: true)
+#
+# gets the shell trying to execute a Python file, which fails with
+#
+#   FSUM7332 syntax error: got ), expecting Newline
+#
+# and exits 1 -- reported by meson as "Command ... failed with status 1".
+# Converting them to EBCDIC with an IBM-1047 tag makes the shebang work either
+# way. Measured: ASCII-tagged with autoconvert off gives rc=1; EBCDIC-tagged
+# returns 2.5.2 with autoconvert both off and on.
+#
+# This is the same treatment zopen-build gives a port's installed scripts; it
+# does not reach into a build venv, which is what this covers.
+_scipy_fix_venv_scripts() {
+  _fv_bin="$1"
+  [ -d "${_fv_bin}" ] || return 0
+  for _fv_script in "${_fv_bin}/"*; do
+    [ -f "${_fv_script}" ] || continue
+    # Only files that actually carry a shebang; converting anything else --
+    # the interpreter symlink, the activate scripts -- would corrupt it.
+    _fv_has=$(python -c 'import sys
+data = open(sys.argv[1], "rb").read(2)
+print("yes" if data == b"#!" else "no")
+' "${_fv_script}" 2> /dev/null) || continue
+    [ "${_fv_has}" = "yes" ] || continue
+    iconv -f ISO8859-1 -t IBM-1047 "${_fv_script}" > "${_fv_script}.ebcdic" \
+      && mv "${_fv_script}.ebcdic" "${_fv_script}" || {
+      rm -f "${_fv_script}.ebcdic"
+      printSoftError "Could not convert ${_fv_script} for execution"
+      return 1
+    }
+    chtag -tc IBM-1047 "${_fv_script}"
+    chmod +x "${_fv_script}"
+  done
+  return 0
+}
+
 zopen_pre_build() {
   # The sources are ASCII; tag them so z/OS tools do not read them as EBCDIC.
   find . -type f \( -name '*.c' -o -name '*.h' -o -name '*.cpp' -o -name '*.hpp' \
@@ -287,6 +330,12 @@ zopen_custom_build() {
       printSoftError "f2py is still not on PATH; scipy cannot be configured without it"
       _sb_rc=1; deactivate; break
     fi
+    # Do this before anything runs them: see the note on _scipy_fix_venv_scripts.
+    _scipy_fix_venv_scripts "$(dirname "$(command -v python)")" \
+      || { _sb_rc=1; deactivate; break; }
+
+    f2py -v > /dev/null 2>&1 \
+      || { printSoftError "f2py does not run after fixing the venv scripts"; _sb_rc=1; deactivate; break; }
     printInfo "- f2py: $(command -v f2py) ($(f2py -v 2>&1 | head -1))"
 
     _sb_pc="$(_scipy_pkgconfig_dir "${_sb_pv}")" \
