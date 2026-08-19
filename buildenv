@@ -79,8 +79,11 @@ SCIPY_MESON_ARGS="-Dblas=blis -Dlapack=lapack"
 # once, and the failure so far has been silent, which is what a process killed
 # for resources looks like rather than one that crashed.
 #
-# Kept low deliberately: a slow build that finishes beats a fast one that dies.
-SCIPY_COMPILE_JOBS="${SCIPY_COMPILE_JOBS:-2}"
+# One job, deliberately. This is the first build of this tree on the platform
+# and the failure is silent, so parallelism is worth removing as a variable
+# rather than reducing: if it still dies at -j1, resources are not the cause and
+# that is a definite answer. Raise it once a build has completed here.
+SCIPY_COMPILE_JOBS="${SCIPY_COMPILE_JOBS:-1}"
 
 zopen_get_version() {
   echo "${SCIPY_VERSION}"
