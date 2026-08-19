@@ -313,6 +313,12 @@ zopen_custom_build() {
   _BPXK_AUTOCVT=ON
   export _BPXK_AUTOCVT
 
+  # meson prints "Unhandled python exception ... This is a Meson bug" without a
+  # traceback unless this is set, and the traceback is the only thing that says
+  # where it actually failed.
+  MESON_FORCE_BACKTRACE=1
+  export MESON_FORCE_BACKTRACE
+
   _sb_meson=$(command -v meson)
   [ -n "${_sb_meson}" ] \
     || printError "meson is not on PATH -- is the meson port a build dependency?"
