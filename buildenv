@@ -70,6 +70,18 @@ export ZOPEN_MAKE="zopen_custom_build"
 # pkg-config, which is why each ships a .pc.
 SCIPY_MESON_ARGS="-Dblas=blis -Dlapack=lapack"
 
+# How many compile jobs ninja may run at once.
+#
+# meson setup completes -- "Found ninja" is its last line -- and meson-python
+# then runs ninja directly. ninja defaults to one job per CPU plus two, and
+# this tree has 177 targets of its own plus 135 from highs, much of it heavy
+# C++ (boost_math, highs). On an LPAR that is a lot of clang++ processes at
+# once, and the failure so far has been silent, which is what a process killed
+# for resources looks like rather than one that crashed.
+#
+# Kept low deliberately: a slow build that finishes beats a fast one that dies.
+SCIPY_COMPILE_JOBS="${SCIPY_COMPILE_JOBS:-2}"
+
 zopen_get_version() {
   echo "${SCIPY_VERSION}"
 }
@@ -446,6 +458,7 @@ print(os.path.join(os.path.dirname(numpy.__file__), "_core", "lib", "pkgconfig")
     # shellcheck disable=SC2086
     python -m build --wheel --no-isolation \
       "-Cbuild-dir=${_sb_builddir}" \
+      "-Ccompile-args=-j${SCIPY_COMPILE_JOBS}" \
       $(for _sb_a in ${SCIPY_MESON_ARGS}; do echo "-Csetup-args=${_sb_a}"; done)
     _sb_rc=$?
 
