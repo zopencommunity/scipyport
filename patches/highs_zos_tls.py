@@ -71,6 +71,84 @@ HighsTaskExecutor::threadLocalExecutorHandle() {
 thread_local HighsSplitDeque* HighsTaskExecutor::threadLocalWorkerDequePtr{"""
 
 
+UARRAY_FROM = """thread_local global_state_t * current_global_state = global_domain_map.get();
+thread_local global_state_t thread_local_domain_map;
+thread_local local_state_t local_domain_map;"""
+
+UARRAY_TO = """#if defined(__MVS__)
+// z/OS: a thread_local may neither have a non-trivial destructor nor a
+// non-constant initializer, and these break both rules -- the maps are
+// std::unordered_map, and current_global_state is seeded from another object.
+// Hold them in pthread keys, whose destructors free them at thread exit, which
+// is what the implicit thread_local destructors did. The macros below keep
+// every use site in this file unchanged.
+#include <pthread.h>
+
+namespace {
+
+pthread_key_t zos_global_map_key;
+pthread_once_t zos_global_map_once = PTHREAD_ONCE_INIT;
+void zos_global_map_free(void * p) { delete static_cast<global_state_t *>(p); }
+void zos_global_map_init() {
+  pthread_key_create(&zos_global_map_key, zos_global_map_free);
+}
+
+pthread_key_t zos_local_map_key;
+pthread_once_t zos_local_map_once = PTHREAD_ONCE_INIT;
+void zos_local_map_free(void * p) { delete static_cast<local_state_t *>(p); }
+void zos_local_map_init() {
+  pthread_key_create(&zos_local_map_key, zos_local_map_free);
+}
+
+pthread_key_t zos_current_key;
+pthread_once_t zos_current_once = PTHREAD_ONCE_INIT;
+void zos_current_free(void * p) { delete static_cast<global_state_t **>(p); }
+void zos_current_init() {
+  pthread_key_create(&zos_current_key, zos_current_free);
+}
+
+global_state_t & zos_thread_local_domain_map() {
+  pthread_once(&zos_global_map_once, zos_global_map_init);
+  void * value = pthread_getspecific(zos_global_map_key);
+  if (value == nullptr) {
+    value = new global_state_t();
+    pthread_setspecific(zos_global_map_key, value);
+  }
+  return *static_cast<global_state_t *>(value);
+}
+
+local_state_t & zos_local_domain_map() {
+  pthread_once(&zos_local_map_once, zos_local_map_init);
+  void * value = pthread_getspecific(zos_local_map_key);
+  if (value == nullptr) {
+    value = new local_state_t();
+    pthread_setspecific(zos_local_map_key, value);
+  }
+  return *static_cast<local_state_t *>(value);
+}
+
+global_state_t *& zos_current_global_state() {
+  pthread_once(&zos_current_once, zos_current_init);
+  void * value = pthread_getspecific(zos_current_key);
+  if (value == nullptr) {
+    value = new global_state_t *(global_domain_map.get());
+    pthread_setspecific(zos_current_key, value);
+  }
+  return *static_cast<global_state_t **>(value);
+}
+
+}  // namespace
+
+#define current_global_state zos_current_global_state()
+#define thread_local_domain_map zos_thread_local_domain_map()
+#define local_domain_map zos_local_domain_map()
+#else
+thread_local global_state_t * current_global_state = global_domain_map.get();
+thread_local global_state_t thread_local_domain_map;
+thread_local local_state_t local_domain_map;
+#endif"""
+
+
 def patch(path, frm, to, what):
     with open(path, "r", encoding="utf-8", errors="surrogateescape") as fh:
         text = fh.read()
@@ -86,11 +164,14 @@ def patch(path, frm, to, what):
 
 
 def main():
-    root = sys.argv[1]
-    patch(root + "/highs/parallel/HighsTaskExecutor.h",
-          HEADER_FROM, HEADER_TO, "accessor declarations")
-    patch(root + "/highs/parallel/HighsTaskExecutor.cpp",
-          CPP_ANCHOR, CPP_INSERT, "thread-local definitions")
+    scipy_root = sys.argv[1]
+    highs = scipy_root + "/subprojects/highs"
+    patch(highs + "/highs/parallel/HighsTaskExecutor.h",
+          HEADER_FROM, HEADER_TO, "HiGHS accessor declarations")
+    patch(highs + "/highs/parallel/HighsTaskExecutor.cpp",
+          CPP_ANCHOR, CPP_INSERT, "HiGHS thread-local definitions")
+    patch(scipy_root + "/scipy/_lib/_uarray/_uarray_dispatch.cxx",
+          UARRAY_FROM, UARRAY_TO, "_uarray thread-local state")
 
 
 if __name__ == "__main__":

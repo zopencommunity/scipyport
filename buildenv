@@ -274,8 +274,8 @@ zopen_pre_build() {
   if [ -d subprojects/highs ]; then
     _sb_pyexe=$(_zopen_python_interpreter_path "$(_zopen_python_primary_version)") \
       || { printSoftError "no interpreter to run the HiGHS patch"; return 1; }
-    printInfo "- patching vendored HiGHS for z/OS thread-local rules"
-    "${_sb_pyexe}" "${ZOPEN_ROOT}/patches/highs_zos_tls.py" "${PWD}/subprojects/highs" \
+    printInfo "- patching HiGHS and _uarray for z/OS thread-local rules"
+    "${_sb_pyexe}" "${ZOPEN_ROOT}/patches/highs_zos_tls.py" "${PWD}" \
       || { printSoftError "could not patch HiGHS"; return 1; }
   fi
 
