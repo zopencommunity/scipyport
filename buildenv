@@ -472,13 +472,31 @@ print(os.path.join(os.path.dirname(numpy.__file__), "_core", "lib", "pkgconfig")
       if [ -f "${_sb_native}" ]; then
         printInfo "- re-running meson setup directly to capture the traceback:"
         rm -rf "${_sb_builddir}.diag"
+        # Capture to a file rather than a pipe, so the exit status is meson's
+        # own. A Python exception prints a traceback; a process killed by the
+        # system prints nothing and exits above 128 -- and meson has been dying
+        # silently right after "Found ninja", which is where it writes
+        # build.ninja for 177 targets plus 135 more from highs.
         # shellcheck disable=SC2086
         "${MESON}" setup "${_sb_builddir}.diag" \
           --native-file="${_sb_native}" \
-          $(for _sb_a in ${SCIPY_MESON_ARGS}; do echo "${_sb_a}"; done) 2>&1 \
-          | tail -45 | while read -r _sb_line; do
-              printInfo "    ${_sb_line}"
-            done
+          $(for _sb_a in ${SCIPY_MESON_ARGS}; do echo "${_sb_a}"; done) \
+          > "${_sb_builddir}.diag.out" 2>&1
+        _sb_diagrc=$?
+        printInfo "- direct meson setup exited ${_sb_diagrc}"
+        if [ ${_sb_diagrc} -gt 128 ]; then
+          printInfo "  (above 128: killed by signal $((_sb_diagrc - 128)) -- not a Python error)"
+        fi
+        tail -30 "${_sb_builddir}.diag.out" 2> /dev/null | while read -r _sb_line; do
+          printInfo "    ${_sb_line}"
+        done
+        _sb_diaglog="${_sb_builddir}.diag/meson-logs/meson-log.txt"
+        if [ -f "${_sb_diaglog}" ]; then
+          printInfo "- tail of the direct run's meson log:"
+          tail -25 "${_sb_diaglog}" 2> /dev/null | while read -r _sb_line; do
+            printInfo "    ${_sb_line}"
+          done
+        fi
       else
         printInfo "- no native file at ${_sb_native}; cannot re-run meson directly"
       fi
