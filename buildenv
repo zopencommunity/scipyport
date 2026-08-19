@@ -72,18 +72,15 @@ SCIPY_MESON_ARGS="-Dblas=blis -Dlapack=lapack"
 
 # How many compile jobs ninja may run at once.
 #
-# meson setup completes -- "Found ninja" is its last line -- and meson-python
-# then runs ninja directly. ninja defaults to one job per CPU plus two, and
-# this tree has 177 targets of its own plus 135 from highs, much of it heavy
-# C++ (boost_math, highs). On an LPAR that is a lot of clang++ processes at
-# once, and the failure so far has been silent, which is what a process killed
-# for resources looks like rather than one that crashed.
+# This was 1 while a silent failure looked like it might be the machine running
+# out of something. It was not -- meson was exiting 1 from a TypeError in the
+# Fortran compiler class, and the build has since compiled hundreds of targets
+# without trouble. So parallelism was never the problem, and 1163 targets of
+# mostly C++ single-threaded is a long wait for no reason.
 #
-# One job, deliberately. This is the first build of this tree on the platform
-# and the failure is silent, so parallelism is worth removing as a variable
-# rather than reducing: if it still dies at -j1, resources are not the cause and
-# that is a definite answer. Raise it once a build has completed here.
-SCIPY_COMPILE_JOBS="${SCIPY_COMPILE_JOBS:-1}"
+# Still bounded rather than left to ninja's default of one job per CPU plus two,
+# because nothing here has measured what this machine will take.
+SCIPY_COMPILE_JOBS="${SCIPY_COMPILE_JOBS:-4}"
 
 zopen_get_version() {
   echo "${SCIPY_VERSION}"
