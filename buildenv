@@ -281,6 +281,40 @@ print("yes" if data == b"#!" else "no")
 # Write a corrected blis.pc into this port's own pkgconfig directory, which is
 # prepended to PKG_CONFIG_PATH so it wins over the installed one. See the note
 # at the call site for what is wrong with the original.
+# Write a corrected lapack.pc beside the corrected blis.pc.
+#
+# lapack.pc carries the path the port was built in rather than the one it was
+# installed to -- zopen rewrites such paths at packaging time, but it selects
+# files with grep, an EBCDIC program, and that file is ASCII, so it is skipped.
+# The build-time path does not survive packaging (the port lands in a
+# timestamped directory), and the consumer gets
+#
+#   IEW5034 The archive library liblapack.a cannot be found
+#
+# Rewriting prefix to ${pcfiledir}/../.. makes it resolve wherever the file
+# actually is. lapackport now emits it that way; this keeps the port working
+# against a LAPACK already installed.
+_sb_fix_lapack_pc() {
+  _fl_dir="${PWD}/.zopen-pkgconfig/$1"
+  mkdir -p "${_fl_dir}" || return 1
+  _fl_src=$(pkg-config --variable=pcfiledir lapack 2> /dev/null)
+  if [ -z "${_fl_src}" ] || [ ! -f "${_fl_src}/lapack.pc" ]; then
+    printSoftError "no lapack.pc found to correct"
+    return 0
+  fi
+  python3 -c 'import re, sys
+src, dst = sys.argv[1], sys.argv[2]
+data = open(src, "rb").read()
+# Only an absolute prefix needs replacing; one already relative is left alone.
+fixed = re.sub(rb"(?m)^prefix=/.*$", rb"prefix=${pcfiledir}/../..", data)
+open(dst, "wb").write(fixed)
+' "${_fl_src}/lapack.pc" "${_fl_dir}/lapack.pc" \
+    || { printSoftError "could not correct lapack.pc"; return 1; }
+  chtag -b "${_fl_dir}/lapack.pc"
+  printInfo "- lapack.pc: $(PKG_CONFIG_PATH="${_fl_dir}" pkg-config --libs lapack 2>&1 | head -1)"
+  return 0
+}
+
 _sb_fix_blis_pc() {
   _fb_dir="${PWD}/.zopen-pkgconfig/$1"
   mkdir -p "${_fb_dir}" || return 1
@@ -501,6 +535,7 @@ ZZ
     # rebuilt BLIS -- it is here because the fix is needed at every consumer,
     # and this port should not depend on which BLIS happens to be installed.
     _sb_fix_blis_pc "${_sb_pv}"
+    _sb_fix_lapack_pc "${_sb_pv}"
 
     _sb_pc="$(_scipy_pkgconfig_dir "${_sb_pv}")" \
       || { printSoftError "Could not write a corrected python-${_sb_pv}.pc"; _sb_rc=1; deactivate; break; }
