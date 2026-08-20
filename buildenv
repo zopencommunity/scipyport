@@ -265,6 +265,41 @@ print("yes" if data == b"#!" else "no")
   return 0
 }
 
+# Write a corrected blis.pc into this port's own pkgconfig directory, which is
+# prepended to PKG_CONFIG_PATH so it wins over the installed one. See the note
+# at the call site for what is wrong with the original.
+_sb_fix_blis_pc() {
+  _fb_dir="${PWD}/.zopen-pkgconfig/$1"
+  mkdir -p "${_fb_dir}" || return 1
+  _fb_src=$(pkg-config --variable=pcfiledir blis 2> /dev/null)
+  if [ -z "${_fb_src}" ] || [ ! -f "${_fb_src}/blis.pc" ]; then
+    printSoftError "no blis.pc found to correct; BLIS may not be installed"
+    return 0
+  fi
+  python3 -c 'import os, sys
+src, dst = sys.argv[1], sys.argv[2]
+data = open(src, "rb").read()
+libdir = None
+for token in data.split():
+    if token.startswith(b"-L") and b"zoslib" in token:
+        libdir = token[2:].decode("iso8859-1")
+        break
+if libdir is None or b"-lzoslib " not in data + b" ":
+    # Nothing to do: either zoslib is not referenced, or a rebuilt BLIS already
+    # names the side deck.
+    open(dst, "wb").write(data)
+    print("unchanged")
+else:
+    sidedeck = os.path.join(libdir, "libzoslib.x").encode("iso8859-1")
+    open(dst, "wb").write(data.replace(b"-lzoslib ", sidedeck + b" "))
+    print("corrected")
+' "${_fb_src}/blis.pc" "${_fb_dir}/blis.pc" > /dev/null 2>&1 \
+    || { printSoftError "could not correct blis.pc"; return 1; }
+  chtag -b "${_fb_dir}/blis.pc" 2> /dev/null
+  printInfo "- blis.pc: $(PKG_CONFIG_PATH="${_fb_dir}" pkg-config --libs blis 2>&1 | head -1)"
+  return 0
+}
+
 zopen_pre_build() {
   # HiGHS uses a thread_local whose type has a destructor, which IBM's clang
   # rejects outright -- see patches/highs_zos_tls.py for what that costs and how
@@ -423,6 +458,19 @@ ZZ
     ( cd scipy 2> /dev/null || cd .; f2py -v > /dev/null 2>&1 ) \
       || { printSoftError "f2py does not run from scipy/ -- check sys.path shadowing"; _sb_rc=1; deactivate; break; }
     printInfo "- f2py: $(command -v f2py) ($(f2py -v 2>&1 | head -1))"
+
+    # Shadow blis.pc with a copy that links zoslib through its side deck.
+    #
+    # blis.pc carries -lzoslib, which resolves to libzoslib.so, and naming a .so
+    # directly on z/OS produces a module with no CELQSTRT CSECT: it links
+    # cleanly and then every extension that pulls in BLIS fails to load with
+    #
+    #   ImportError: CEE3595S DLL ... does not contain a CELQSTRT CSECT
+    #
+    # blisport now emits the side deck itself, so this is a no-op against a
+    # rebuilt BLIS -- it is here because the fix is needed at every consumer,
+    # and this port should not depend on which BLIS happens to be installed.
+    _sb_fix_blis_pc "${_sb_pv}"
 
     _sb_pc="$(_scipy_pkgconfig_dir "${_sb_pv}")" \
       || { printSoftError "Could not write a corrected python-${_sb_pv}.pc"; _sb_rc=1; deactivate; break; }
