@@ -58,8 +58,7 @@ export ZOPEN_DEV_DEPS="${ZOPEN_STABLE_DEPS}"
 export ZOPEN_RUNTIME_DEPS="check_python numpy"
 export ZOPEN_CATEGORIES="development library math"
 
-# TEMPORARY, while this port is still being brought up: build one interpreter
-# instead of three.
+# Building this port is expensive, and most of the cost is paid three times.
 #
 # meson-python builds a wheel per interpreter, each in its own venv and build
 # directory, so the whole tree is compiled three times -- and most of it has
@@ -67,11 +66,9 @@ export ZOPEN_CATEGORIES="development library math"
 # boost_math, xsf, cobyqa, unuran, pyprima and odrpack's Fortran are all
 # Python-independent, so those objects are produced identically three times.
 #
-# Every failure found so far has been version-independent, so paying that three
-# times while debugging buys nothing. RESTORE THIS to "3.12 3.13 3.14" before
-# the port is considered done -- the wheels are per-interpreter and all three
-# must ship.
-export ZOPEN_PYTHON_VERSIONS="${ZOPEN_PYTHON_VERSIONS:-3.12}"
+# That cost is worth paying only for the real matrix: the wheels are tagged
+# per interpreter, so all three have to be built and shipped.
+export ZOPEN_PYTHON_VERSIONS="${ZOPEN_PYTHON_VERSIONS:-3.12 3.13 3.14}"
 export ZOPEN_BUILD_SYSTEM="Python"
 
 # The compiler is taken from sysconfig per interpreter, not from zopen.
@@ -686,7 +683,12 @@ import os
 import sys
 import tempfile
 
-print("Running tests with Python %s" % sys.version.split()[0])
+# Do not reuse zopen-build's wording here. It prints its own "Running tests
+# with Python <ver>" header once per interpreter, and zopen_check_results
+# counts that header to notice an interpreter that died before reaching its
+# first check. Printing the same phrase from inside the script matched twice
+# per interpreter, so a clean run looked like it had one silent crash.
+print("Interpreter: Python %s" % sys.version.split()[0])
 
 # zopen's environment leaves PYTHONPATH with a leading empty entry, because
 # ports build it as "${PYTHONPATH}:..." from an unset variable. Python expands
