@@ -304,6 +304,13 @@ src, dst = sys.argv[1], sys.argv[2]
 data = open(src, "rb").read()
 # The real install root: this file lives at <root>/lib/pkgconfig/lapack.pc.
 root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(src))))
+# Deriving a path from where the file sits is only valid if the file really is
+# the one LAPACK installed. Read a copy this port wrote earlier and the same
+# arithmetic yields scipy - which links, silently, against a lib directory that
+# has no liblapack.a in it. Insist on seeing the archive.
+if not os.path.exists(os.path.join(root, "lib", "liblapack.a")):
+    sys.exit("refusing to use %s: no lib/liblapack.a under it (read from %s)"
+             % (root, src))
 # An absolute prefix, deliberately -- not ${pcfiledir}. That form is right for
 # the copy shipped inside the install tree, but this copy is written into the
 # build tree, where ../.. would point at scipy rather than at LAPACK.
@@ -452,7 +459,15 @@ zopen_custom_build() {
   printVerbose "MESON=${MESON} ($(${MESON} --version 2>/dev/null))"
 
   _sb_rc=0
+  # This loop prepends its own pkgconfig directory to PKG_CONFIG_PATH and
+  # exports it, and an export outlives the iteration that made it. Without a
+  # pristine copy to start each interpreter from, the second pass searches the
+  # first pass's directory before the real one, and _sb_fix_lapack_pc reads a
+  # shadow it wrote itself rather than the file LAPACK installed.
+  _sb_pcpath0="${PKG_CONFIG_PATH}"
   for _sb_pv in $(_zopen_python_versions); do
+    PKG_CONFIG_PATH="${_sb_pcpath0}"
+    export PKG_CONFIG_PATH
     printHeader "Building wheel with Python ${_sb_pv}"
     _zopen_python_ensure_venv_for "${_sb_pv}" || { _sb_rc=1; break; }
 
