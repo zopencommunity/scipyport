@@ -58,7 +58,20 @@ export ZOPEN_DEV_DEPS="${ZOPEN_STABLE_DEPS}"
 export ZOPEN_RUNTIME_DEPS="check_python numpy"
 export ZOPEN_CATEGORIES="development library math"
 
-export ZOPEN_PYTHON_VERSIONS="3.12 3.13 3.14"
+# TEMPORARY, while this port is still being brought up: build one interpreter
+# instead of three.
+#
+# meson-python builds a wheel per interpreter, each in its own venv and build
+# directory, so the whole tree is compiled three times -- and most of it has
+# nothing to do with Python. highs alone is 135 C++ targets, and qhull_r,
+# boost_math, xsf, cobyqa, unuran, pyprima and odrpack's Fortran are all
+# Python-independent, so those objects are produced identically three times.
+#
+# Every failure found so far has been version-independent, so paying that three
+# times while debugging buys nothing. RESTORE THIS to "3.12 3.13 3.14" before
+# the port is considered done -- the wheels are per-interpreter and all three
+# must ship.
+export ZOPEN_PYTHON_VERSIONS="${ZOPEN_PYTHON_VERSIONS:-3.12}"
 export ZOPEN_BUILD_SYSTEM="Python"
 
 # The compiler is taken from sysconfig per interpreter, not from zopen.
