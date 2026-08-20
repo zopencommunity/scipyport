@@ -55,9 +55,7 @@ export ZOPEN_CLONE_SUBMODULES="yes"
 # f2py and numpy-config, resolving numpy from the venv with no PYTHONPATH.
 export ZOPEN_STABLE_DEPS="check_python meson ninja pkgconfig curl git patch fortran lapack blis"
 export ZOPEN_DEV_DEPS="${ZOPEN_STABLE_DEPS}"
-# zoslib is a runtime dependency, not just a build one: BLIS is linked through
-# zoslib's side deck, so the extensions load libzoslib.so when imported.
-export ZOPEN_RUNTIME_DEPS="check_python numpy zoslib"
+export ZOPEN_RUNTIME_DEPS="check_python numpy"
 export ZOPEN_CATEGORIES="development library math"
 
 # TEMPORARY, while this port is still being brought up: build one interpreter
@@ -299,14 +297,19 @@ for token in data.split():
     if token.startswith(b"-L") and b"zoslib" in token:
         libdir = token[2:].decode("iso8859-1")
         break
-if libdir is None or b"-lzoslib " not in data + b" ":
-    # Nothing to do: either zoslib is not referenced, or a rebuilt BLIS already
-    # names the side deck.
+if libdir is None:
     open(dst, "wb").write(data)
     print("unchanged")
 else:
-    sidedeck = os.path.join(libdir, "libzoslib.x").encode("iso8859-1")
-    open(dst, "wb").write(data.replace(b"-lzoslib ", sidedeck + b" "))
+    static = os.path.join(libdir, "libzoslib.a").encode("iso8859-1")
+    # Whichever form BLIS advertises -- -lzoslib (which resolves to the .so and
+    # produces a module the loader rejects), the side deck, or the .so itself --
+    # becomes the static archive.
+    for form in (b"-lzoslib ",
+                 os.path.join(libdir, "libzoslib.x").encode("iso8859-1") + b" ",
+                 os.path.join(libdir, "libzoslib.so").encode("iso8859-1") + b" "):
+        data = data.replace(form, static + b" ")
+    open(dst, "wb").write(data)
     print("corrected")
 ' "${_fb_src}/blis.pc" "${_fb_dir}/blis.pc" > /dev/null 2>&1 \
     || { printSoftError "could not correct blis.pc"; return 1; }
@@ -639,23 +642,6 @@ print(os.path.join(os.path.dirname(numpy.__file__), "_core", "lib", "pkgconfig")
 # exist here). Running a smoke check that exercises the parts this port exists
 # to get right is more useful than a suite that cannot start.
 zopen_python_test() {
-  # The check runs before install, so nothing has set LIBPATH for the runtime
-  # dependencies yet. Without this the first import fails with
-  #
-  #   CEE3501S The module libzoslib.so was not found.
-  #
-  # which is the load-time half of linking BLIS through zoslib's side deck.
-  _st_zoslib=""
-  [ -f "${ZOPEN_ROOT}/.zoslib-libdir" ] && _st_zoslib=$(cat "${ZOPEN_ROOT}/.zoslib-libdir")
-  [ -n "${_st_zoslib}" ] || _st_zoslib=$(pkg-config --variable=libdir zoslib 2> /dev/null)
-  if [ -n "${_st_zoslib}" ] && [ -d "${_st_zoslib}" ]; then
-    LIBPATH="${_st_zoslib}${LIBPATH:+:${LIBPATH}}"
-    export LIBPATH
-    printVerbose "LIBPATH=${LIBPATH}"
-  else
-    printSoftError "zoslib libdir not found; the extensions will not load"
-  fi
-
   SCIPY_EXPECTED_VERSION="${SCIPY_VERSION}" python - <<'PYEOF'
 import os
 import sys
