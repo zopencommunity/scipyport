@@ -302,11 +302,15 @@ _sb_fix_lapack_pc() {
     printSoftError "no lapack.pc found to correct"
     return 0
   fi
-  python3 -c 'import re, sys
+  python3 -c 'import os, re, sys
 src, dst = sys.argv[1], sys.argv[2]
 data = open(src, "rb").read()
-# Only an absolute prefix needs replacing; one already relative is left alone.
-fixed = re.sub(rb"(?m)^prefix=/.*$", rb"prefix=${pcfiledir}/../..", data)
+# The real install root: this file lives at <root>/lib/pkgconfig/lapack.pc.
+root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(src))))
+# An absolute prefix, deliberately -- not ${pcfiledir}. That form is right for
+# the copy shipped inside the install tree, but this copy is written into the
+# build tree, where ../.. would point at scipy rather than at LAPACK.
+fixed = re.sub(rb"(?m)^prefix=.*$", b"prefix=" + root.encode("iso8859-1"), data)
 open(dst, "wb").write(fixed)
 ' "${_fl_src}/lapack.pc" "${_fl_dir}/lapack.pc" \
     || { printSoftError "could not correct lapack.pc"; return 1; }
