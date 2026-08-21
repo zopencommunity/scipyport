@@ -687,11 +687,13 @@ print(os.path.join(os.path.dirname(numpy.__file__), "_core", "lib", "pkgconfig")
   return ${_sb_rc}
 }
 
-# scipy's own test suite is not run here. It needs pytest and hypothesis for
-# every interpreter, and hypothesis cannot be installed on this platform yet
-# (its build backend is maturin, which needs a Rust toolchain that does not
-# exist here). Running a smoke check that exercises the parts this port exists
-# to get right is more useful than a suite that cannot start.
+# scipy's own test suite is not run here: it needs pytest and hypothesis for
+# every interpreter and takes hours. Both do install -- hypothesis ships a
+# pure-Python wheel, and pip only tries to build it from source, and fails, if
+# it is allowed to choose an sdist; --only-binary=:all: gets the wheel. So the
+# full suite is available for verifying a build by hand, and is worth running
+# against a candidate wheel; what follows is the subset kept cheap enough to
+# run on every build.
 zopen_python_test() {
   SCIPY_EXPECTED_VERSION="${SCIPY_VERSION}" python - <<'PYEOF'
 import os
@@ -786,6 +788,52 @@ check("linalg.lu_factor / lu_solve",
           linalg.lu_solve(linalg.lu_factor(np.array([[3., 1.], [1., 2.]])),
                           np.array([9., 8.])),
           np.array([2., 3.])))
+
+
+# Everything above is 2x2 and 3x3, and LAPACK factors matrices that small with
+# the unblocked GETF2, which is not recursive. A whole LAPACK built so that its
+# 24 RECURSIVE routines corrupted their own locals -- getrf2 and potrf2 in
+# every precision -- passed every one of those checks, while scipy.linalg.solve
+# on a 20x20 returned a residual of 2.5e13 and sometimes died in dlaswp.
+#
+# So: solve something large enough to recurse, in both real and complex, and
+# check the numbers rather than just that a call returned.
+def _recursive_lapack_is_sane(dtype):
+    n = 20
+    rng = np.random.default_rng(1234)
+    a = rng.random((n, n))
+    if dtype is complex:
+        a = a + 1j * rng.random((n, n))
+    a[np.diag_indices(n)] += 100.0          # condition number near 2.75
+    b = rng.random((n, 3)).astype(dtype)
+    x = linalg.solve(a, b)
+    residual = float(np.abs(a @ x - b).max())
+    if not residual < 1e-9:
+        raise AssertionError("residual %.3e -- LAPACK's recursive path is "
+                             "miscompiled (see -qnosave in lapackport)" % residual)
+    # The pivots for this matrix are the identity; a corrupted recursion
+    # produces repeats like 1 2 6 7 8 while still reporting success.
+    _, piv = linalg.lu_factor(a)
+    if not np.array_equal(piv, np.arange(n)):
+        raise AssertionError("lu_factor pivots are %r, expected 0..%d"
+                             % (piv.tolist(), n - 1))
+
+
+check("linalg.solve 20x20 (recursive LAPACK, real)",
+      lambda: _recursive_lapack_is_sane(float))
+check("linalg.solve 20x20 (recursive LAPACK, complex)",
+      lambda: _recursive_lapack_is_sane(complex))
+def _recursive_cholesky_is_sane():
+    m = np.random.default_rng(7).random((20, 20))
+    a = m @ m.T + np.eye(20) * 30.0       # symmetric positive definite
+    r = linalg.cholesky(a)
+    error = float(np.abs(r.T.conj() @ r - a).max())
+    if not error < 1e-9:
+        raise AssertionError("R'R differs from A by %.3e -- potrf2's recursion "
+                             "is miscompiled" % error)
+
+
+check("linalg.cholesky 20x20 (recursive potrf2)", _recursive_cholesky_is_sane)
 
 # Cython extensions
 from scipy import sparse
