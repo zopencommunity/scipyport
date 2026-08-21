@@ -817,6 +817,9 @@ def _recursive_lapack_is_sane(dtype):
     if not np.array_equal(piv, np.arange(n)):
         raise AssertionError("lu_factor pivots are %r, expected 0..%d"
                              % (piv.tolist(), n - 1))
+    # check() reports on the return value, not on the absence of an exception:
+    # returning None here would fail the check on a perfectly good build.
+    return True
 
 
 check("linalg.solve 20x20 (recursive LAPACK, real)",
@@ -831,6 +834,7 @@ def _recursive_cholesky_is_sane():
     if not error < 1e-9:
         raise AssertionError("R'R differs from A by %.3e -- potrf2's recursion "
                              "is miscompiled" % error)
+    return True
 
 
 check("linalg.cholesky 20x20 (recursive potrf2)", _recursive_cholesky_is_sane)
